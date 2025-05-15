@@ -1,4 +1,4 @@
-package com.sameerasw.airsync // Your package name
+package com.sameerasw.airsync
 
 import android.Manifest
 import android.content.ComponentName
@@ -9,8 +9,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log // Import Log
-import android.widget.Toast // Import Toast
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -24,7 +24,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.sameerasw.airsync.ui.theme.AirSyncTheme // Ensure this theme exists
+import androidx.lifecycle.lifecycleScope
+import com.sameerasw.airsync.data.AppDatabase
+import com.sameerasw.airsync.data.AppRepository
+import com.sameerasw.airsync.ui.theme.AirSyncTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -33,8 +37,16 @@ class MainActivity : ComponentActivity() {
         Log.d("MainActivity", "onCreate called. Intent: ${intent?.action}")
         handleShareIntent(intent) // Handle intent if app was launched via share
 
+        // Initialize app database
+        val database = AppDatabase.getDatabase(applicationContext)
+        val repository = AppRepository(database.appSettingsDao())
+
+        lifecycleScope.launch {
+            repository.loadAllInstalledApps(applicationContext)
+        }
+
         setContent {
-            AirSyncTheme { // Or your theme name e.g. Theme.AirSync
+            AirSyncTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
@@ -58,29 +70,15 @@ class MainActivity : ComponentActivity() {
             intent.getStringExtra(Intent.EXTRA_TEXT)?.let { sharedText ->
                 Log.i("MainActivity", "Shared text received: $sharedText")
                 if (NotificationForwardingService.isServiceRunning()) {
-                    NotificationForwardingService.queueClipboardData(sharedText) // New method to queue clipboard data
-                    Toast.makeText(this, "Text sent to synced clipboard!", Toast.LENGTH_SHORT).show()
+                    NotificationForwardingService.queueClipboardData(sharedText)
+                    Toast.makeText(this, "Text sent to Mac", Toast.LENGTH_SHORT).show()
                 } else {
-                    Toast.makeText(this, "Sync service not running. Please start it first.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "Service not running. Start service first.", Toast.LENGTH_LONG).show()
                 }
-
-                // Optional: If the app was opened *only* for sharing, you might want to finish it
-                // This prevents the main UI from staying open if the user just shared and expected to go back.
-                // Be careful with this logic if users might also open the app to share *and* then interact with the UI.
-                // if (isTaskRoot && intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY == 0) {
-                //    finish()
-                // }
             }
         }
     }
 }
-
-// ... (Rest of your MainActivity: NotificationSenderScreen, permission checks, etc.)
-// Make sure checkNotificationListenerPermission and checkPostNotificationPermission are still there.
-// You'll need to copy the existing @Composable NotificationSenderScreen and its helper functions.
-// The code you provided for MainActivity was cut off before these.
-// For brevity, I'm not re-pasting the entire NotificationSenderScreen composable here,
-// but it should remain as it was.
 
 @Composable
 fun NotificationSenderScreen() {
@@ -88,35 +86,86 @@ fun NotificationSenderScreen() {
     var isServiceRunning by remember { mutableStateOf(NotificationForwardingService.isServiceRunning()) }
     var hasNotificationPermission by remember { mutableStateOf(checkNotificationListenerPermission(context)) }
     var hasPostNotificationPermission by remember { mutableStateOf(checkPostNotificationPermission(context)) }
-
     val localIpAddress by remember { mutableStateOf(NotificationForwardingService.getLocalIpAddress() ?: "N/A (Enable Wi-Fi)") }
 
+    var showAppList by remember { mutableStateOf(false) }
+
     val notificationListenerPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.StartActivityForResult()
+        ActivityResultContracts.StartActivityForResult()
     ) {
         hasNotificationPermission = checkNotificationListenerPermission(context)
-        if (hasNotificationPermission && isServiceRunning) {
-            ContextCompat.startForegroundService(context, Intent(context, NotificationForwardingService::class.java).setAction(NotificationForwardingService.ACTION_START_SERVICE))
-        }
     }
 
     val postNotificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { isGranted: Boolean ->
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
         hasPostNotificationPermission = isGranted
     }
 
     LaunchedEffect(Unit) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
-            postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
+        hasNotificationPermission = checkNotificationListenerPermission(context)
+        hasPostNotificationPermission = checkPostNotificationPermission(context)
     }
+
+    // Poll periodically to update service status and permissions
     LaunchedEffect(key1 = Unit) {
+        kotlinx.coroutines.delay(1000)
         isServiceRunning = NotificationForwardingService.isServiceRunning()
         hasNotificationPermission = checkNotificationListenerPermission(context)
         hasPostNotificationPermission = checkPostNotificationPermission(context)
     }
 
+    if (showAppList) {
+        AppListScreen(onBackClick = { showAppList = false })
+    } else {
+        MainScreen(
+            isServiceRunning = isServiceRunning,
+            hasNotificationPermission = hasNotificationPermission,
+            hasPostNotificationPermission = hasPostNotificationPermission,
+            localIpAddress = localIpAddress,
+            onServiceToggle = { shouldRun ->
+                if (shouldRun) {
+                    // Try to start the service
+                    if (!hasNotificationPermission) {
+                        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                        notificationListenerPermissionLauncher.launch(intent)
+                    }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
+                        postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                    }
+
+                    if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
+                        && hasNotificationPermission) {
+                        val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
+                            action = NotificationForwardingService.ACTION_START_SERVICE
+                        }
+                        ContextCompat.startForegroundService(context, serviceIntent)
+                        isServiceRunning = true
+                    }
+                } else {
+                    // Stop the service
+                    val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
+                        action = NotificationForwardingService.ACTION_STOP_SERVICE
+                    }
+                    context.startService(serviceIntent)
+                    isServiceRunning = false
+                }
+            },
+            onOpenAppList = { showAppList = true }
+        )
+    }
+}
+
+@Composable
+fun MainScreen(
+    isServiceRunning: Boolean,
+    hasNotificationPermission: Boolean,
+    hasPostNotificationPermission: Boolean,
+    localIpAddress: String,
+    onServiceToggle: (Boolean) -> Unit,
+    onOpenAppList: () -> Unit
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -125,77 +174,169 @@ fun NotificationSenderScreen() {
         verticalArrangement = Arrangement.Center
     ) {
         Text(
-            text = "AirSync Client", // Or your app name
+            text = "AirSync",
             style = MaterialTheme.typography.headlineMedium,
+            textAlign = TextAlign.Center,
             modifier = Modifier.padding(bottom = 24.dp)
         )
 
-        Text(
-            text = "Local IP: $localIpAddress",
-            style = MaterialTheme.typography.bodyLarge,
-            modifier = Modifier.padding(bottom = 16.dp)
-        )
+        // Permission status
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                Text(
+                    text = "Permissions",
+                    style = MaterialTheme.typography.titleMedium
+                )
 
-        if (!hasPostNotificationPermission && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text("The app needs permission to show a persistent notification.", style = MaterialTheme.typography.bodyMedium)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }) {
-                        Text("Grant 'Post Notifications' Permission")
-                    }
-                }
-            }
-        }
-
-        if (!hasNotificationPermission) {
-            Card(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-                Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text("This app requires Notification Access to read notifications.", style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Button(onClick = { notificationListenerPermissionLauncher.launch(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }) {
-                        Text("Grant Notification Access")
-                    }
-                    Text("Enable '${context.getString(R.string.notification_listener_service_label)}' in the list.", style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 4.dp))
-                }
-            }
-        } else {
-            Text("Notification Access: Granted", color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 16.dp))
-        }
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(bottom = 16.dp)) {
-            Text("Sync Service:", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.width(16.dp))
-            Switch(
-                checked = isServiceRunning,
-                onCheckedChange = { shouldRun ->
-                    if (shouldRun) {
-                        if (!hasNotificationPermission) return@Switch
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
-                            postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            return@Switch
-                        }
-                        ContextCompat.startForegroundService(context, Intent(context, NotificationForwardingService::class.java).setAction(NotificationForwardingService.ACTION_START_SERVICE))
-                        isServiceRunning = true
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Notification Access",
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (hasNotificationPermission) {
+                        Text(
+                            text = "Granted",
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     } else {
-                        context.startService(Intent(context, NotificationForwardingService::class.java).setAction(NotificationForwardingService.ACTION_STOP_SERVICE))
-                        isServiceRunning = false
+                        val context = LocalContext.current
+                        Button(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                                context.startActivity(intent)
+                            }
+                        ) {
+                            Text("Grant")
+                        }
                     }
-                },
-                enabled = hasNotificationPermission && (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) hasPostNotificationPermission else true)
-            )
-        }
-        Text(if (isServiceRunning) "Service is RUNNING" else "Service is STOPPED", color = if (isServiceRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error)
+                }
 
-        Spacer(modifier = Modifier.height(20.dp))
-        Button(onClick = {
-            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-            intent.data = Uri.fromParts("package", context.packageName, null)
-            context.startActivity(intent)
-        }) {
-            Text("App Info (for testing)")
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "Post Notifications",
+                            modifier = Modifier.weight(1f)
+                        )
+                        if (hasPostNotificationPermission) {
+                            Text(
+                                text = "Granted",
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        } else {
+                            val context = LocalContext.current
+                            val launcher = rememberLauncherForActivityResult(
+                                ActivityResultContracts.RequestPermission()
+                            ) { /* result handled in parent */ }
+
+                            Button(
+                                onClick = {
+                                    launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                }
+                            ) {
+                                Text("Grant")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Service status and control
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp)
+            ) {
+                Text(
+                    text = "Service Status",
+                    style = MaterialTheme.typography.titleMedium
+                )
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = if (isServiceRunning) "Running" else "Stopped",
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = isServiceRunning,
+                        onCheckedChange = { onServiceToggle(it) },
+                        enabled = hasNotificationPermission &&
+                                (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
+                    )
+                }
+
+                if (isServiceRunning) {
+                    Text(
+                        text = "Your device IP: $localIpAddress",
+                        modifier = Modifier.padding(top = 8.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Text(
+                        text = "Port: ${NotificationForwardingService.SERVER_PORT}",
+                        modifier = Modifier.padding(top = 4.dp),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+        }
+
+        // App list button
+        Button(
+            onClick = onOpenAppList,
+            modifier = Modifier.padding(top = 16.dp),
+            enabled = true
+        ) {
+            Text("Manage App Notifications")
+        }
+
+        // Instructions
+        if (isServiceRunning) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
+                ) {
+                    Text(
+                        text = "How to Use",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "1. Make sure both devices are on the same WiFi network\n" +
+                                "2. Note your IP address: $localIpAddress\n" +
+                                "3. On your Mac, enter this address and port ${NotificationForwardingService.SERVER_PORT}\n" +
+                                "4. You can also share text to this app to send to your Mac",
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
         }
     }
 }

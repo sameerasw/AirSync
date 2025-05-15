@@ -1,4 +1,4 @@
-package com.sameerasw.airsync // Your package name
+package com.sameerasw.airsync
 
 import android.app.Notification
 import android.content.Intent
@@ -11,15 +11,28 @@ import android.os.Build
 import android.os.IBinder
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import android.util.Base64 // Import Base64
+import android.util.Base64
 import android.util.Log
+import com.sameerasw.airsync.data.AppDatabase
+import com.sameerasw.airsync.data.AppRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.io.ByteArrayOutputStream
 
 class MyNotificationListener : NotificationListenerService() {
 
+    private lateinit var repository: AppRepository
+    private val coroutineScope = CoroutineScope(Dispatchers.IO)
+
     companion object {
         const val TAG = "MyNotificationListener"
-        // ... other constants
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        val database = AppDatabase.getDatabase(applicationContext)
+        repository = AppRepository(database.appSettingsDao())
     }
 
     // Helper function to convert Drawable to Bitmap
@@ -77,57 +90,84 @@ class MyNotificationListener : NotificationListenerService() {
             return
         }
 
-        val packageName = sbn.packageName
-        val notification = sbn.notification
-        val extras = notification.extras
+        coroutineScope.launch {
+            val appSettings = repository.getAppByPackageName(sbn.packageName)
 
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-
-        var appName = packageName // Default to package name
-        var appIconBase64: String? = null
-
-        try {
-            val pm = applicationContext.packageManager
-            val applicationInfo: ApplicationInfo = pm.getApplicationInfo(packageName, 0)
-            appName = pm.getApplicationLabel(applicationInfo).toString()
-
-            // Get App Icon
-            val iconDrawable: Drawable? = pm.getApplicationIcon(applicationInfo)
-            if (iconDrawable != null) {
-                val iconBitmap = drawableToBitmap(iconDrawable)
-                appIconBase64 = bitmapToBase64(iconBitmap)
-                // Log.d(TAG, "Icon Base64 length: ${appIconBase64?.length}")
-            } else {
-                Log.w(TAG, "Could not get app icon drawable for $packageName")
+            // If app not in database or disabled, don't forward notification
+            if (appSettings == null) {
+                // App not in database yet, likely a new app install
+                // Default decision: forward notifications from non-system apps
+                val pm = applicationContext.packageManager
+                try {
+                    val appInfo = pm.getApplicationInfo(sbn.packageName, 0)
+                    val isSystemApp = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+                    if (isSystemApp) {
+                        Log.d(TAG, "Ignoring notification from new system app: ${sbn.packageName}")
+                        return@launch
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error checking app info for ${sbn.packageName}", e)
+                }
+            } else if (!appSettings.isEnabled) {
+                Log.d(TAG, "Ignoring notification from disabled app: ${sbn.packageName}")
+                return@launch
             }
 
-        } catch (e: Exception) {
-            Log.w(TAG, "Couldn't get app info or icon for $packageName", e)
+            val packageName = sbn.packageName
+            val notification = sbn.notification
+            val extras = notification.extras
+
+            val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+            val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+            val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+
+            var appName = packageName // Default to package name
+            var appIconBase64: String? = null
+
+            try {
+                val pm = applicationContext.packageManager
+                val applicationInfo: ApplicationInfo = pm.getApplicationInfo(packageName, 0)
+                appName = pm.getApplicationLabel(applicationInfo).toString()
+
+                // Get App Icon
+                val iconDrawable: Drawable? = pm.getApplicationIcon(applicationInfo)
+                if (iconDrawable != null) {
+                    val iconBitmap = drawableToBitmap(iconDrawable)
+                    appIconBase64 = bitmapToBase64(iconBitmap)
+                    // Log.d(TAG, "Icon Base64 length: ${appIconBase64?.length}")
+                } else {
+                    Log.w(TAG, "Could not get app icon drawable for $packageName")
+                }
+
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't get app info or icon for $packageName", e)
+            }
+
+            if (title.isBlank() && text.isBlank() && (bigText == null || bigText.isBlank())) {
+                Log.d(
+                    TAG,
+                    "Ignoring notification with no visible text content from $appName ($packageName)"
+                )
+                return@launch
+            }
+
+            val bestText = bigText ?: text ?: ""
+
+            Log.i(TAG, "Notification Posted:")
+            Log.i(TAG, "  App: $appName ($packageName)")
+            Log.i(TAG, "  Title: $title")
+            Log.i(TAG, "  Text: $bestText")
+            Log.i(TAG, "  Icon available: ${appIconBase64 != null}")
+
+            // Replace this line in MyNotificationListener.kt:
+            NotificationForwardingService.queueNotificationData(
+                appName = appName,
+                title = title,
+                text = bestText,
+                packageName = packageName,
+                iconBase64 = appIconBase64 // Pass the icon data
+            )
         }
-
-        if (title.isBlank() && text.isBlank() && (bigText == null || bigText.isBlank())) {
-            Log.d(TAG, "Ignoring notification with no visible text content from $appName ($packageName)")
-            return
-        }
-
-        val bestText = bigText ?: text ?: ""
-
-        Log.i(TAG, "Notification Posted:")
-        Log.i(TAG, "  App: $appName ($packageName)")
-        Log.i(TAG, "  Title: $title")
-        Log.i(TAG, "  Text: $bestText")
-        Log.i(TAG, "  Icon available: ${appIconBase64 != null}")
-
-        // Replace this line in MyNotificationListener.kt:
-        NotificationForwardingService.queueNotificationData(
-            appName = appName,
-            title = title,
-            text = bestText,
-            packageName = packageName,
-            iconBase64 = appIconBase64 // Pass the icon data
-        )
     }
 
     override fun onBind(intent: Intent?): IBinder? {
