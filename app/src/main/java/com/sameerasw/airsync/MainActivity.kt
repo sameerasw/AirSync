@@ -29,8 +29,15 @@ import com.sameerasw.airsync.data.AppRepository
 import com.sameerasw.airsync.ui.theme.AirSyncTheme
 import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity() {
+// New imports for About Dialog
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.font.FontWeight
 
+
+class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.d("MainActivity", "onCreate called. Intent: ${intent?.action}")
@@ -110,7 +117,7 @@ fun NotificationSenderScreen(onOpenAppList: () -> Unit) {
 
     // Poll periodically to update service status and permissions
     LaunchedEffect(key1 = Unit) {
-        kotlinx.coroutines.delay(1000)
+        kotlinx.coroutines.delay(1000) // Consider making this a constant or configurable
         isServiceRunning = NotificationForwardingService.isServiceRunning()
         hasNotificationPermission = checkNotificationListenerPermission(context)
         hasPostNotificationPermission = checkPostNotificationPermission(context)
@@ -140,6 +147,13 @@ fun NotificationSenderScreen(onOpenAppList: () -> Unit) {
                     }
                     ContextCompat.startForegroundService(context, serviceIntent)
                     isServiceRunning = true
+                } else {
+                    // Display a toast if permissions are still missing before attempting to start
+                    if (!hasNotificationPermission) {
+                        Toast.makeText(context, "Notification Access permission is required.", Toast.LENGTH_LONG).show()
+                    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
+                        Toast.makeText(context, "Post Notifications permission is required.", Toast.LENGTH_LONG).show()
+                    }
                 }
             } else {
                 // Stop the service
@@ -163,63 +177,37 @@ fun MainScreen(
     onServiceToggle: (Boolean) -> Unit,
     onOpenAppList: () -> Unit
 ) {
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(
-            text = "AirSync",
-            style = MaterialTheme.typography.headlineMedium,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(bottom = 24.dp)
-        )
+    var showAboutDialog by remember { mutableStateOf(false) }
 
-        // Permission status
-        Card(
+    Box(modifier = Modifier.fillMaxSize()) { // Wrap in Box for dialog overlay
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
+                .fillMaxSize()
+                .padding(16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
         ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Text(
-                    text = "Permissions",
-                    style = MaterialTheme.typography.titleMedium
-                )
+            Text(
+                text = "AirSync",
+                style = MaterialTheme.typography.headlineMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(bottom = 24.dp)
+            )
 
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            // Permission status
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "Notification Access",
-                        modifier = Modifier.weight(1f)
+                        text = "Permissions",
+                        style = MaterialTheme.typography.titleMedium
                     )
-                    if (hasNotificationPermission) {
-                        Text(
-                            text = "Granted",
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                    } else {
-                        val context = LocalContext.current
-                        Button(
-                            onClick = {
-                                val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                                context.startActivity(intent)
-                            }
-                        ) {
-                            Text("Grant")
-                        }
-                    }
-                }
 
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -227,115 +215,170 @@ fun MainScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "Post Notifications",
+                            text = "Notification Access",
                             modifier = Modifier.weight(1f)
                         )
-                        if (hasPostNotificationPermission) {
+                        if (hasNotificationPermission) {
                             Text(
                                 text = "Granted",
                                 color = MaterialTheme.colorScheme.primary
                             )
                         } else {
                             val context = LocalContext.current
-                            val launcher = rememberLauncherForActivityResult(
-                                ActivityResultContracts.RequestPermission()
-                            ) { /* result handled in parent */ }
-
                             Button(
                                 onClick = {
-                                    launcher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                                    context.startActivity(intent)
                                 }
                             ) {
                                 Text("Grant")
                             }
                         }
                     }
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Post Notifications",
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (hasPostNotificationPermission) {
+                                Text(
+                                    text = "Granted",
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            } else {
+                                val context = LocalContext.current
+                                // Re-using parent's launcher, ensure it's correctly triggered
+                                // The button here currently re-declares a launcher, which is not ideal.
+                                // For simplicity, we assume the parent's launcher mechanism is the primary way.
+                                // This button here is more of a visual cue if permission is denied.
+                                // The actual request logic is in NotificationSenderScreen.
+                                val postNotificationPermissionLauncher = rememberLauncherForActivityResult(
+                                    ActivityResultContracts.RequestPermission()
+                                ) { /* This result should ideally update the state in NotificationSenderScreen */ }
+
+                                Button(
+                                    onClick = {
+                                        postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                                    }
+                                ) {
+                                    Text("Grant")
+                                }
+                            }
+                        }
+                    }
                 }
             }
-        }
 
-        // Service status and control
-        Card(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(bottom = 16.dp)
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp)
-            ) {
-                Text(
-                    text = "Service Status",
-                    style = MaterialTheme.typography.titleMedium
-                )
-
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (isServiceRunning) "Running" else "Stopped",
-                        modifier = Modifier.weight(1f)
-                    )
-                    Switch(
-                        checked = isServiceRunning,
-                        onCheckedChange = { onServiceToggle(it) },
-                        enabled = hasNotificationPermission &&
-                                (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
-                    )
-                }
-
-                if (isServiceRunning) {
-                    Text(
-                        text = "Your device IP: $localIpAddress",
-                        modifier = Modifier.padding(top = 8.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                    Text(
-                        text = "Port: ${NotificationForwardingService.SERVER_PORT}",
-                        modifier = Modifier.padding(top = 4.dp),
-                        style = MaterialTheme.typography.bodyMedium
-                    )
-                }
-            }
-        }
-
-        // App list button
-        Button(
-            onClick = onOpenAppList,
-            modifier = Modifier.padding(top = 16.dp),
-            enabled = true
-        ) {
-            Text("Manage App Notifications")
-        }
-
-        // Instructions
-        if (isServiceRunning) {
+            // Service status and control
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 16.dp)
+                    .padding(bottom = 16.dp)
             ) {
                 Column(
                     modifier = Modifier.padding(16.dp)
                 ) {
                     Text(
-                        text = "How to Use",
+                        text = "Service Status",
                         style = MaterialTheme.typography.titleMedium
                     )
-                    Text(
-                        text = "1. Make sure both devices are on the same WiFi network\n" +
-                                "2. Note your IP address: $localIpAddress\n" +
-                                "3. On your Mac, enter this address and port ${NotificationForwardingService.SERVER_PORT}\n" +
-                                "4. You can also share text to this app to send to your Mac",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isServiceRunning) "Running" else "Stopped",
+                            modifier = Modifier.weight(1f)
+                        )
+                        Switch(
+                            checked = isServiceRunning,
+                            onCheckedChange = { onServiceToggle(it) },
+                            enabled = hasNotificationPermission &&
+                                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
+                        )
+                    }
+
+                    if (isServiceRunning) {
+                        Text(
+                            text = "Your device IP: $localIpAddress",
+                            modifier = Modifier.padding(top = 8.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = "Port: ${NotificationForwardingService.SERVER_PORT}",
+                            modifier = Modifier.padding(top = 4.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
                 }
             }
+
+            // App list button
+            Button(
+                onClick = onOpenAppList,
+                modifier = Modifier.padding(top = 16.dp),
+                enabled = true
+            ) {
+                Text("Manage App Notifications")
+            }
+
+            // Instructions
+            if (isServiceRunning) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp)
+                    ) {
+                        Text(
+                            text = "How to Use",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                        Text(
+                            text = "1. Make sure both devices are on the same WiFi network\n" +
+                                    "2. Note your IP address: $localIpAddress\n" +
+                                    "3. On your Mac, enter this address and port ${NotificationForwardingService.SERVER_PORT}\n" +
+                                    "4. You can also share text to this app to send to your Mac",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.padding(top = 8.dp)
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(24.dp)) // Space before About button
+
+            // About Button
+            OutlinedButton(
+                onClick = { showAboutDialog = true }
+            ) {
+                Text("About AirSync")
+            }
+        } // End of Column
+
+        // About Dialog - displayed on top of other content when showAboutDialog is true
+        if (showAboutDialog) {
+            AboutDialog(
+                onDismissRequest = { showAboutDialog = false },
+                appName = "AirSync",
+                developerName = "Sameera Wijerathna", // Replace with your name if different
+                description = "AirSync forwards Android notifications and shared text to your Mac over your local Wi-Fi network.",
+                githubUsername = "sameerasw" // Replace with your GitHub username if different
+            )
         }
-    }
+    } // End of Box
 }
 
 fun checkNotificationListenerPermission(context: Context): Boolean {
@@ -347,4 +390,41 @@ fun checkPostNotificationPermission(context: Context): Boolean {
     return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
         ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
     } else true
+}
+
+// AboutDialog Composable (adapted from Moview app)
+@Composable
+fun AboutDialog(
+    onDismissRequest: () -> Unit,
+    appName: String,
+    developerName: String,
+    description: String,
+    githubUsername: String? = null
+) {
+    val uriHandler = LocalUriHandler.current
+
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        title = { Text("About $appName") },
+        text = {
+            Column {
+                Text("Developed by: $developerName", style = MaterialTheme.typography.bodyMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(description, style = MaterialTheme.typography.bodySmall)
+                githubUsername?.let {
+                    Spacer(modifier = Modifier.height(16.dp))
+                    TextButton(onClick = {
+                        uriHandler.openUri("https://github.com/$it")
+                    }) {
+                        Text("GitHub: @$it", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismissRequest) {
+                Text("Close")
+            }
+        }
+    )
 }
