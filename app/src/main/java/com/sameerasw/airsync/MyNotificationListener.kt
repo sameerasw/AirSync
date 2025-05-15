@@ -1,24 +1,133 @@
-package com.sameerasw.airsync
-
+package com.sameerasw.airsync // Your package name
 
 import android.app.Notification
 import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Build
 import android.os.IBinder
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import android.util.Base64 // Import Base64
 import android.util.Log
+import java.io.ByteArrayOutputStream
 
 class MyNotificationListener : NotificationListenerService() {
 
     companion object {
         const val TAG = "MyNotificationListener"
-        // Action to send notification data to our own app/service
-        const val ACTION_SEND_NOTIFICATION_DATA = "com.yourname.notificationsender.SEND_NOTIFICATION_DATA"
-        const val EXTRA_APP_NAME = "extra_app_name"
-        const val EXTRA_TITLE = "extra_title"
-        const val EXTRA_TEXT = "extra_text"
-        const val EXTRA_PACKAGE_NAME = "extra_package_name"
+        // ... other constants
+    }
+
+    // Helper function to convert Drawable to Bitmap
+    private fun drawableToBitmap(drawable: Drawable): Bitmap? {
+        if (drawable is BitmapDrawable) {
+            return drawable.bitmap
+        }
+        // For other drawables, attempt to draw to a new bitmap
+        val intrinsicWidth = drawable.intrinsicWidth
+        val intrinsicHeight = drawable.intrinsicHeight
+        if (intrinsicWidth <= 0 || intrinsicHeight <= 0) {
+            return null // Cannot create bitmap with invalid dimensions
+        }
+        return try {
+            val bitmap = Bitmap.createBitmap(intrinsicWidth, intrinsicHeight, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(bitmap)
+            drawable.setBounds(0, 0, canvas.width, canvas.height)
+            drawable.draw(canvas)
+            bitmap
+        } catch (e: Exception) {
+            Log.e(TAG, "Error converting drawable to bitmap", e)
+            null
+        }
+    }
+
+    // Helper function to convert Bitmap to Base64 String
+    private fun bitmapToBase64(bitmap: Bitmap?, quality: Int = 50): String? { // Lower quality for smaller string
+        if (bitmap == null) return null
+        return try {
+            val byteArrayOutputStream = ByteArrayOutputStream()
+            // Compress to PNG or JPEG. PNG is lossless but can be larger. JPEG is lossy.
+            // For icons, PNG is often preferred, but let's try JPEG for size.
+            bitmap.compress(Bitmap.CompressFormat.JPEG, quality, byteArrayOutputStream)
+            val byteArray = byteArrayOutputStream.toByteArray()
+            Base64.encodeToString(byteArray, Base64.NO_WRAP) // NO_WRAP is important for network transmission
+        } catch (e: Exception) {
+            Log.e(TAG, "Error converting bitmap to Base64", e)
+            null
+        }
+    }
+
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        super.onNotificationPosted(sbn)
+        if (sbn == null) return
+
+        if (sbn.isOngoing) {
+            if (sbn.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0) {
+                Log.d(TAG, "Ignoring foreground service notification from ${sbn.packageName}")
+                return
+            }
+        }
+
+        if (sbn.packageName == applicationContext.packageName) {
+            Log.d(TAG, "Ignoring notification from own app: ${sbn.packageName}")
+            return
+        }
+
+        val packageName = sbn.packageName
+        val notification = sbn.notification
+        val extras = notification.extras
+
+        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
+
+        var appName = packageName // Default to package name
+        var appIconBase64: String? = null
+
+        try {
+            val pm = applicationContext.packageManager
+            val applicationInfo: ApplicationInfo = pm.getApplicationInfo(packageName, 0)
+            appName = pm.getApplicationLabel(applicationInfo).toString()
+
+            // Get App Icon
+            val iconDrawable: Drawable? = pm.getApplicationIcon(applicationInfo)
+            if (iconDrawable != null) {
+                val iconBitmap = drawableToBitmap(iconDrawable)
+                appIconBase64 = bitmapToBase64(iconBitmap)
+                // Log.d(TAG, "Icon Base64 length: ${appIconBase64?.length}")
+            } else {
+                Log.w(TAG, "Could not get app icon drawable for $packageName")
+            }
+
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't get app info or icon for $packageName", e)
+        }
+
+        if (title.isBlank() && text.isBlank() && (bigText == null || bigText.isBlank())) {
+            Log.d(TAG, "Ignoring notification with no visible text content from $appName ($packageName)")
+            return
+        }
+
+        val bestText = bigText ?: text ?: ""
+
+        Log.i(TAG, "Notification Posted:")
+        Log.i(TAG, "  App: $appName ($packageName)")
+        Log.i(TAG, "  Title: $title")
+        Log.i(TAG, "  Text: $bestText")
+        Log.i(TAG, "  Icon available: ${appIconBase64 != null}")
+
+        // Replace this line in MyNotificationListener.kt:
+        NotificationForwardingService.queueNotificationData(
+            appName = appName,
+            title = title,
+            text = bestText,
+            packageName = packageName,
+            iconBase64 = appIconBase64 // Pass the icon data
+        )
     }
 
     override fun onBind(intent: Intent?): IBinder? {
@@ -39,92 +148,6 @@ class MyNotificationListener : NotificationListenerService() {
         Log.i(TAG, "Notification Listener disconnected.")
     }
 
-    override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        super.onNotificationPosted(sbn)
-        if (sbn == null) return
-
-        // Ignore ongoing notifications (like downloads, music players unless you want them)
-        if (sbn.isOngoing) {
-            // Log.d(TAG, "Ignoring ongoing notification from ${sbn.packageName}")
-            // You might want to make this configurable later
-            // For now, let's allow some ongoing like music for testing, but not foreground service notifs
-            if (sbn.notification.flags and Notification.FLAG_FOREGROUND_SERVICE != 0) {
-                Log.d(TAG, "Ignoring foreground service notification from ${sbn.packageName}")
-                return
-            }
-        }
-
-        // Ignore our own app's notifications (e.g., the foreground service notification)
-        if (sbn.packageName == applicationContext.packageName) {
-            Log.d(TAG, "Ignoring notification from own app: ${sbn.packageName}")
-            return
-        }
-
-
-        val packageName = sbn.packageName
-        val notification = sbn.notification
-        val extras = notification.extras
-
-        val title = extras.getString(Notification.EXTRA_TITLE) ?: ""
-        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString() ?: ""
-        // Sometimes EXTRA_BIG_TEXT contains more details
-        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()
-
-        val appName = try {
-            val pm = applicationContext.packageManager
-            val applicationInfo = pm.getApplicationInfo(packageName, 0)
-            pm.getApplicationLabel(applicationInfo).toString()
-        } catch (e: Exception) {
-            Log.w(TAG, "Couldn't get app name for $packageName", e)
-            packageName // Fallback to package name
-        }
-
-        // We only care about notifications that have some text content
-        if (title.isBlank() && text.isBlank() && (bigText == null || bigText.isBlank())) {
-            Log.d(TAG, "Ignoring notification with no visible text content from $appName ($packageName)")
-            return
-        }
-
-        val bestText = bigText ?: text
-
-        Log.i(TAG, "Notification Posted:")
-        Log.i(TAG, "  App: $appName ($packageName)")
-        Log.i(TAG, "  Title: $title")
-        Log.i(TAG, "  Text: $bestText")
-        // Log.i(TAG, "  ID: ${sbn.id}")
-        // Log.i(TAG, "  Key: ${sbn.key}")
-        // Log.i(TAG, "  Tag: ${sbn.tag}")
-        // Log.i(TAG, "  Post Time: ${sbn.postTime}")
-
-        // --- TODO: Send this data to our NetworkServer ---
-        // For now, we'll use a LocalBroadcastManager or an Intent to send it to our Foreground Service
-        // which will then handle the network communication.
-        NotificationForwardingService.queueNotificationData(
-            appName = appName,
-            title = title,
-            text = bestText ?: "",
-            packageName = packageName
-        )
-
-        // Using a more specific local broadcast or direct service call is better than global broadcast.
-        // For simplicity, let's assume a service will pick this up.
-        // LocalBroadcastManager.getInstance(this).sendBroadcast(intent)
-        // Or, if NetworkService is running, you could try to bind to it or send a command.
-        // For now, we will have the NetworkService start this listener if enabled,
-        // and the listener will directly call a method in the NetworkService.
-
-        // This is a placeholder for direct communication. This service (MyNotificationListener)
-        // will be started and managed by NotificationForwardingService.
-        // NotificationForwardingService.sendNotificationToClients(this, appName, title, bestText, packageName)
-        // The above line would create a tight coupling. Instead, use an event bus or broadcast.
-        // For now, we'll make NotificationForwardingService a singleton or provide a static method to queue data.
-        NotificationForwardingService.queueNotificationData(
-            appName = appName,
-            title = title,
-            text = bestText,
-            packageName = packageName
-        )
-    }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         super.onNotificationRemoved(sbn)

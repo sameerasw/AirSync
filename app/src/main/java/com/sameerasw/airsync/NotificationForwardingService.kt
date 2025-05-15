@@ -48,13 +48,14 @@ class NotificationForwardingService : Service() {
 
         fun isServiceRunning(): Boolean = instance != null
 
-        fun queueNotificationData(appName: String, title: String, text: String, packageName: String) {
+        // In NotificationForwardingService.kt, update the queueNotificationData method:
+        fun queueNotificationData(appName: String, title: String, text: String, packageName: String, iconBase64: String? = null) {
             if (!isServiceRunning()) {
                 Log.w(TAG, "Service not running, cannot queue notification data.")
                 return
             }
             try {
-                notificationQueue.put(NotificationData(appName, title, text, packageName))
+                notificationQueue.put(NotificationData(appName, title, text, packageName, iconBase64))
                 Log.d(TAG, "Notification data queued for ${appName}.")
             } catch (e: InterruptedException) {
                 Log.e(TAG, "Failed to queue notification data", e)
@@ -80,11 +81,13 @@ class NotificationForwardingService : Service() {
         }
     }
 
+    // In NotificationForwardingService.kt
     data class NotificationData(
         val appName: String,
         val title: String,
         val text: String,
-        val packageName: String
+        val packageName: String,
+        val iconBase64: String? = null // Add this line
     )
 
     private val serviceJob = SupervisorJob()
@@ -279,9 +282,9 @@ class NotificationForwardingService : Service() {
     }
 
 
+    // In NotificationForwardingService.kt
     private fun sendNotificationToAllClients(data: NotificationData) {
         if (clientSockets.isEmpty()) {
-            //Log.d(TAG, "No clients connected, not sending notification: ${data.title}")
             return
         }
 
@@ -289,7 +292,10 @@ class NotificationForwardingService : Service() {
         json.put("app", data.appName)
         json.put("title", data.title)
         json.put("text", data.text)
-        json.put("packageName", data.packageName) // Optional: for more advanced filtering on client
+        json.put("packageName", data.packageName)
+        data.iconBase64?.let {  // Only add if icon data exists
+            json.put("icon_base64", it)
+        }
         val jsonString = json.toString()
 
         Log.d(TAG, "Sending to ${clientSockets.size} client(s): $jsonString")
