@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">AirSync</string>
+    <string name="notification_listener_service_label">Notification Forwarding Service</string>
+</resources>
