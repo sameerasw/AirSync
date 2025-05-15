@@ -33,22 +33,23 @@ import java.util.concurrent.LinkedBlockingQueue
 
 class NotificationForwardingService : Service() {
 
+    // New data class for clipboard items
+    data class ClipboardPushData(val text: String, val type: String = "clipboard")
+
     companion object {
         const val TAG = "NotificationFwdSvc"
         private const val NOTIFICATION_CHANNEL_ID = "NotificationForwardingChannel"
         private const val NOTIFICATION_ID = 1
-        // In NotificationForwardingService.kt
         const val ACTION_START_SERVICE = "com.sameerasw.airsync.ACTION_START_SERVICE"
         const val ACTION_STOP_SERVICE = "com.sameerasw.airsync.ACTION_STOP_SERVICE"
-        const val SERVER_PORT = 12345 // Ensure this matches your Python client
+        const val SERVER_PORT = 12345
 
-        // Static queue for notifications from MyNotificationListener
         private val notificationQueue = LinkedBlockingQueue<NotificationData>()
-        private var instance: NotificationForwardingService? = null // For simple access
+        private val clipboardQueue = LinkedBlockingQueue<ClipboardPushData>() // New queue for clipboard
+        private var instance: NotificationForwardingService? = null
 
         fun isServiceRunning(): Boolean = instance != null
 
-        // In NotificationForwardingService.kt, update the queueNotificationData method:
         fun queueNotificationData(appName: String, title: String, text: String, packageName: String, iconBase64: String? = null) {
             if (!isServiceRunning()) {
                 Log.w(TAG, "Service not running, cannot queue notification data.")
@@ -59,6 +60,23 @@ class NotificationForwardingService : Service() {
                 Log.d(TAG, "Notification data queued for ${appName}.")
             } catch (e: InterruptedException) {
                 Log.e(TAG, "Failed to queue notification data", e)
+                Thread.currentThread().interrupt()
+            }
+        }
+
+        // New method to queue clipboard data
+        fun queueClipboardData(text: String) {
+            if (!isServiceRunning()) {
+                Log.w(TAG, "Service not running, cannot queue clipboard data.")
+                // Optionally, you could consider starting the service here if it's not running,
+                // but that might be unexpected user behavior. For now, just log and return.
+                return
+            }
+            try {
+                clipboardQueue.put(ClipboardPushData(text))
+                Log.i(TAG, "Clipboard data queued: ${text.take(50)}...")
+            } catch (e: InterruptedException) {
+                Log.e(TAG, "Failed to queue clipboard data", e)
                 Thread.currentThread().interrupt()
             }
         }
@@ -115,6 +133,7 @@ class NotificationForwardingService : Service() {
                 ensureNotificationListenerEnabled() // Attempt to enable/check listener
                 serviceScope.launch { startServer() }
                 serviceScope.launch { processNotificationQueue() }
+                serviceScope.launch { processClipboardQueue() }
             }
             ACTION_STOP_SERVICE -> {
                 Log.i(TAG, "Stopping service...")
@@ -122,6 +141,64 @@ class NotificationForwardingService : Service() {
             }
         }
         return START_STICKY // Restart service if killed
+    }
+
+    // Method to process the clipboard queue
+    private suspend fun processClipboardQueue() {
+        withContext(Dispatchers.IO) {
+            Log.i(TAG, "Clipboard processing queue started.")
+            try {
+                while (isActive) {
+                    val data = clipboardQueue.take() // Blocks until an item is available
+                    Log.d(TAG, "Processing clipboard data from queue: ${data.text.take(50)}...")
+                    sendClipboardDataToAllClients(data)
+                }
+            } catch (e: InterruptedException) {
+                Log.i(TAG, "Clipboard processing queue interrupted.")
+                Thread.currentThread().interrupt() // Preserve interrupt status
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception in clipboard processing queue", e)
+            } finally {
+                Log.i(TAG, "Clipboard processing queue stopped.")
+            }
+        }
+    }
+
+    // Method to send clipboard data to all clients
+    private fun sendClipboardDataToAllClients(data: ClipboardPushData) {
+        if (clientSockets.isEmpty()) {
+            Log.d(TAG, "No clients connected, not sending clipboard data.")
+            return
+        }
+
+        val json = JSONObject()
+        json.put("type", data.type) // Will be "clipboard"
+        json.put("text", data.text)
+        val jsonString = json.toString()
+
+        Log.d(TAG, "Sending clipboard to ${clientSockets.size} client(s): $jsonString")
+        val clientsToRemove = mutableListOf<Socket>()
+        synchronized(clientSockets) {
+            clientSockets.forEach { (socket, writer) ->
+                try {
+                    writer.println(jsonString) // println adds a newline
+                    if (writer.checkError()) { // Check for errors after write
+                        Log.w(TAG, "Error sending clipboard to client ${socket.inetAddress}. Marking for removal.")
+                        clientsToRemove.add(socket)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Exception sending clipboard to client ${socket.inetAddress}", e)
+                    clientsToRemove.add(socket)
+                }
+            }
+
+            clientsToRemove.forEach { socket ->
+                clientSockets.remove(socket)?.close() // Close writer
+                try { socket.close() } catch (e: IOException) { /* ignore */ }
+                Log.i(TAG, "Removed disconnected client after clipboard send attempt: ${socket.inetAddress}")
+            }
+        }
+        // No need to update the persistent notification for clipboard sends usually
     }
 
     private fun createServiceNotification(contentText: String): Notification {
@@ -337,12 +414,8 @@ class NotificationForwardingService : Service() {
         stopServer()
         serviceJob.cancel() // Cancel all coroutines
         notificationQueue.clear()
+        clipboardQueue.clear() // Clear clipboard queue
         instance = null
-        // Unbind or disable listener if desired, though system manages it based on permission.
-        // If you programmatically enabled it:
-        // val componentName = ComponentName(this, MyNotificationListener::class.java)
-        // packageManager.setComponentEnabledSetting(componentName, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, PackageManager.DONT_KILL_APP)
-        // Log.i(TAG, "NotificationListener component state reset to default.")
         isListenerBound = false
     }
 
