@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.*
@@ -30,6 +31,7 @@ import java.net.SocketException
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
+import kotlin.coroutines.coroutineContext
 
 class NotificationForwardingService : Service() {
 
@@ -148,14 +150,14 @@ class NotificationForwardingService : Service() {
         withContext(Dispatchers.IO) {
             Log.i(TAG, "Clipboard processing queue started.")
             try {
-                while (isActive) {
-                    val data = clipboardQueue.take() // Blocks until an item is available
+                while (coroutineContext.isActive) { // Fixed usage of isActive
+                    val data = clipboardQueue.take()
                     Log.d(TAG, "Processing clipboard data from queue: ${data.text.take(50)}...")
                     sendClipboardDataToAllClients(data)
                 }
             } catch (e: InterruptedException) {
                 Log.i(TAG, "Clipboard processing queue interrupted.")
-                Thread.currentThread().interrupt() // Preserve interrupt status
+                Thread.currentThread().interrupt()
             } catch (e: Exception) {
                 Log.e(TAG, "Exception in clipboard processing queue", e)
             } finally {
@@ -278,72 +280,160 @@ class NotificationForwardingService : Service() {
                 serverSocket = ServerSocket(SERVER_PORT)
                 val ipAddress = getLocalIpAddress() ?: "N/A"
                 Log.i(TAG, "Server started on port $SERVER_PORT. IP: $ipAddress")
-                updateNotificationMessage("Listening on IP: $ipAddress Port: $SERVER_PORT")
+                updateNotificationMessage("Listening on IP: $ipAddress Port: $SERVER_PORT. Clients: ${clientSockets.size}")
 
-                while (isActive) { // isActive is from CoroutineScope
+                while (isActive) {
                     try {
                         val clientSocket = serverSocket!!.accept() // Blocking call
                         Log.i(TAG, "Client connected: ${clientSocket.inetAddress.hostAddress}")
+
+                        // Setup writer for this client (for sending notifications/clipboard from Android to Mac)
                         val writer = PrintWriter(BufferedWriter(OutputStreamWriter(clientSocket.getOutputStream(), "UTF-8")), true)
-                        clientSockets[clientSocket] = writer
-                        // Send a welcome message or status
+                        synchronized(clientSockets) { // Synchronize access to clientSockets map
+                            clientSockets[clientSocket] = writer
+                        }
+                        updateNotificationMessage("Clients: ${clientSockets.size}. Listening on IP: $ipAddress Port: $SERVER_PORT")
+
+
+                        // Send a welcome/status message to the connected client
                         writer.println(JSONObject().apply {
-                            put("type", "status")
+                            put("type", "status") // Differentiate this message
                             put("message", "Connected to AndroidNotificationSender")
                             put("android_version", Build.VERSION.RELEASE)
-                        }.toString())
+                        }.toString()) // .toString() is important
 
-                        // Optional: Start a new coroutine to handle reads from this client if needed
-                        // For now, we only write to clients.
+                        // Launch a new coroutine to handle reading from this client
+                        serviceScope.launch {
+                            handleClientReads(clientSocket, clientSocket.inetAddress.hostAddress)
+                        }
+
                     } catch (e: SocketException) {
                         if (!isActive || serverSocket?.isClosed == true) {
-                            Log.i(TAG, "Server socket closed, exiting accept loop.")
+                            Log.i(TAG, "Server socket closed or no longer active, exiting accept loop.")
                             break
                         }
-                        Log.e(TAG, "SocketException in accept loop (client might have disconnected abruptly or socket closed): ${e.message}")
+                        Log.e(TAG, "SocketException in server accept loop: ${e.message}")
                     } catch (e: IOException) {
                         Log.e(TAG, "IOException in server accept loop", e)
-                        delay(1000) // Wait a bit before retrying
+                        delay(1000)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Server could not start or encountered a fatal error.", e)
-                updateNotificationMessage("Error: ${e.message}")
+                updateNotificationMessage("Error: ${e.message ?: "Unknown error"}")
             } finally {
                 Log.i(TAG, "Server loop ending.")
-                stopServer()
+                stopServerCleanup() // Renamed for clarity
             }
         }
     }
 
-    private fun stopServer() {
-        Log.i(TAG, "Stopping server and closing client connections.")
+    // New function to handle reads from a specific client
+    private suspend fun handleClientReads(clientSocket: Socket, clientAddress: String) {
+        Log.i(TAG, "Started reader for client: $clientAddress")
         try {
-            serverSocket?.close()
+            // It's crucial to use a BufferedReader for readLine()
+            val reader = clientSocket.getInputStream().bufferedReader(Charsets.UTF_8)
+            while (coroutineContext.isActive && clientSocket.isConnected && !clientSocket.isClosed) {
+                val line = reader.readLine() // Reads a line of text, expecting JSON per line from Python
+                if (line == null) {
+                    Log.i(TAG, "Client $clientAddress disconnected (readLine returned null).")
+                    break // End of stream
+                }
+                Log.d(TAG, "Android: Received from $clientAddress: $line")
+                try {
+                    val jsonData = JSONObject(line)
+                    when (jsonData.optString("type")) {
+                        "clipboard_push_to_android" -> {
+                            val textToCopy = jsonData.optString("text")
+                            if (textToCopy != null) {
+                                Log.i(TAG, "Android: Received clipboard text from $clientAddress: '$textToCopy'")
+                                copyTextToAndroidClipboard(textToCopy)
+                            } else {
+                                Log.w(TAG, "Android: clipboard_push_to_android type received but 'text' is null or missing.")
+                            }
+                        }
+                        // You can add other types here if Python sends other commands
+                        else -> {
+                            Log.w(TAG, "Android: Received unknown JSON type from $clientAddress: ${jsonData.optString("type")}")
+                        }
+                    }
+                } catch (e: org.json.JSONException) {
+                    Log.e(TAG, "Android: JSONException parsing data from $clientAddress: ${e.message}. Data: $line")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Android: Error processing data from $clientAddress: ${e.message}")
+                }
+            }
+        } catch (e: IOException) {
+            // This can happen if the client disconnects abruptly or network issue
+            Log.i(TAG, "Android: IOException for client $clientAddress (likely disconnected): ${e.message}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Android: Unexpected error in handleClientReads for $clientAddress: ${e.message}", e)
+        } finally {
+            Log.i(TAG, "Android: Reader for client $clientAddress ending.")
+            // Cleanup for this specific client
+            synchronized(clientSockets) {
+                clientSockets.remove(clientSocket)
+            }
+            try {
+                clientSocket.close()
+            } catch (e: IOException) {
+                Log.w(TAG, "Android: Error closing client socket for $clientAddress in finally block: ${e.message}")
+            }
+            val ipAddress = getLocalIpAddress() ?: "N/A"
+            updateNotificationMessage("Clients: ${clientSockets.size}. Listening on IP: $ipAddress Port: $SERVER_PORT")
+        }
+    }
+
+    // New function to copy text to Android's clipboard
+    private fun copyTextToAndroidClipboard(text: String) {
+        // Clipboard operations must happen on the main thread if they involve UI (like Toasts)
+        // The actual copying can be off-thread, but Toasts must be on main.
+        MainScope().launch { // Use MainScope for UI operations from a service/background thread
+            try {
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                val clip = android.content.ClipData.newPlainText("Copied from Mac", text)
+                clipboard.setPrimaryClip(clip)
+                Log.i(TAG, "Text copied to Android clipboard: '${text.take(70)}...'")
+                Toast.makeText(applicationContext, "Text copied from Mac!", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error copying text to Android clipboard", e)
+                Toast.makeText(applicationContext, "Error copying from Mac", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    // Renamed stopServer to stopServerCleanup to avoid confusion if called from multiple places
+    private fun stopServerCleanup() {
+        Log.i(TAG, "Stopping server and closing all client connections.")
+        try {
+            serverSocket?.close() // This will interrupt the accept() call
             serverSocket = null
             synchronized(clientSockets) {
                 clientSockets.forEach { (socket, writer) ->
                     try {
-                        writer.close()
-                        socket.close()
+                        writer.close() // Close the PrintWriter
+                        socket.close() // Close the socket
                     } catch (e: IOException) {
-                        Log.e(TAG, "Error closing client socket: ${socket.inetAddress}", e)
+                        Log.e(TAG, "Error closing a client socket during server stop: ${socket.inetAddress}", e)
                     }
                 }
                 clientSockets.clear()
             }
             Log.i(TAG, "All client connections closed and server socket stopped.")
         } catch (e: IOException) {
-            Log.e(TAG, "Error closing server socket", e)
+            Log.e(TAG, "Error closing main server socket", e)
         }
+        updateNotificationMessage("Service stopped.")
     }
+
 
     private suspend fun processNotificationQueue() {
         withContext(Dispatchers.IO) {
             Log.i(TAG, "Notification processing queue started.")
             try {
-                while (isActive) {
-                    val data = notificationQueue.take() // Blocks until an item is available
+                while (coroutineContext.isActive) { // Fixed usage of isActive
+                    val data = notificationQueue.take()
                     Log.d(TAG, "Processing notification for ${data.appName} from queue.")
                     sendNotificationToAllClients(data)
                 }
@@ -411,10 +501,10 @@ class NotificationForwardingService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         Log.i(TAG, "Service Destroyed")
-        stopServer()
-        serviceJob.cancel() // Cancel all coroutines
+        stopServerCleanup() // Call the cleanup method
+        serviceJob.cancel()
         notificationQueue.clear()
-        clipboardQueue.clear() // Clear clipboard queue
+        clipboardQueue.clear()
         instance = null
         isListenerBound = false
     }
