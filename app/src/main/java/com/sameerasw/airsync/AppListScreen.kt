@@ -21,10 +21,11 @@ import com.sameerasw.airsync.data.AppDatabase
 import com.sameerasw.airsync.data.AppRepository
 import com.sameerasw.airsync.data.AppSettings
 import kotlinx.coroutines.launch
+import androidx.activity.compose.BackHandler
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AppListScreen(onBackClick: () -> Unit) {
+fun AppListScreen() {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val database = remember { AppDatabase.getDatabase(context) }
@@ -58,12 +59,7 @@ fun AppListScreen(onBackClick: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("App Notifications") },
-                navigationIcon = {
-                    IconButton(onClick = onBackClick) {
-                        Icon(Icons.Default.ArrowBack, contentDescription = "Back")
-                    }
-                }
+                title = { Text("App Notifications") }
             )
         }
     ) { paddingValues ->

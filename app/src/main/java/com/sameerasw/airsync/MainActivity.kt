@@ -5,7 +5,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -51,7 +50,11 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    NotificationSenderScreen()
+                    NotificationSenderScreen(
+                        onOpenAppList = {
+                            startActivity(Intent(this, AppListActivity::class.java))
+                        }
+                    )
                 }
             }
         }
@@ -81,14 +84,12 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun NotificationSenderScreen() {
+fun NotificationSenderScreen(onOpenAppList: () -> Unit) {
     val context = LocalContext.current
     var isServiceRunning by remember { mutableStateOf(NotificationForwardingService.isServiceRunning()) }
     var hasNotificationPermission by remember { mutableStateOf(checkNotificationListenerPermission(context)) }
     var hasPostNotificationPermission by remember { mutableStateOf(checkPostNotificationPermission(context)) }
     val localIpAddress by remember { mutableStateOf(NotificationForwardingService.getLocalIpAddress() ?: "N/A (Enable Wi-Fi)") }
-
-    var showAppList by remember { mutableStateOf(false) }
 
     val notificationListenerPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -115,46 +116,42 @@ fun NotificationSenderScreen() {
         hasPostNotificationPermission = checkPostNotificationPermission(context)
     }
 
-    if (showAppList) {
-        AppListScreen(onBackClick = { showAppList = false })
-    } else {
-        MainScreen(
-            isServiceRunning = isServiceRunning,
-            hasNotificationPermission = hasNotificationPermission,
-            hasPostNotificationPermission = hasPostNotificationPermission,
-            localIpAddress = localIpAddress,
-            onServiceToggle = { shouldRun ->
-                if (shouldRun) {
-                    // Try to start the service
-                    if (!hasNotificationPermission) {
-                        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
-                        notificationListenerPermissionLauncher.launch(intent)
-                    }
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
-                        postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    }
-
-                    if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
-                        && hasNotificationPermission) {
-                        val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
-                            action = NotificationForwardingService.ACTION_START_SERVICE
-                        }
-                        ContextCompat.startForegroundService(context, serviceIntent)
-                        isServiceRunning = true
-                    }
-                } else {
-                    // Stop the service
-                    val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
-                        action = NotificationForwardingService.ACTION_STOP_SERVICE
-                    }
-                    context.startService(serviceIntent)
-                    isServiceRunning = false
+    MainScreen(
+        isServiceRunning = isServiceRunning,
+        hasNotificationPermission = hasNotificationPermission,
+        hasPostNotificationPermission = hasPostNotificationPermission,
+        localIpAddress = localIpAddress,
+        onServiceToggle = { shouldRun ->
+            if (shouldRun) {
+                // Try to start the service
+                if (!hasNotificationPermission) {
+                    val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+                    notificationListenerPermissionLauncher.launch(intent)
                 }
-            },
-            onOpenAppList = { showAppList = true }
-        )
-    }
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasPostNotificationPermission) {
+                    postNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                }
+
+                if ((Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || hasPostNotificationPermission)
+                    && hasNotificationPermission) {
+                    val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
+                        action = NotificationForwardingService.ACTION_START_SERVICE
+                    }
+                    ContextCompat.startForegroundService(context, serviceIntent)
+                    isServiceRunning = true
+                }
+            } else {
+                // Stop the service
+                val serviceIntent = Intent(context, NotificationForwardingService::class.java).apply {
+                    action = NotificationForwardingService.ACTION_STOP_SERVICE
+                }
+                context.startService(serviceIntent)
+                isServiceRunning = false
+            }
+        },
+        onOpenAppList = onOpenAppList
+    )
 }
 
 @Composable
