@@ -108,8 +108,10 @@ The project aims to fill the gap for Android users who also use macOS, offering 
 ---
 
 ## Configuration
+1. **Grant Wireless Debugging:**  
+   - Enable Wireless Debugging from the developer options
 
-1. **First Launch:**  
+2. **First Launch:**  
    - Grant notification and clipboard permissions as prompted.
        - If the settings infor that these are restricted, You will have to visit app info, click the 3 dot menu and allow restricted permissions with biometrics if requested and then try again
    - You might need to close and re-open the app after both permissions granted.
