@@ -67,7 +67,9 @@ The project aims to fill the gap for Android users who also use macOS, offering 
 
 <!-- Add screenshots here -->
 <p align="center">
+  
   ![Screenshot_20250515-190811](https://github.com/user-attachments/assets/8002d209-2d47-44db-9c31-8ffd4ef08385)
+  
 </p>
 
 ---
