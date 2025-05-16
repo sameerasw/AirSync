@@ -109,7 +109,7 @@ The project aims to fill the gap for Android users who also use macOS, offering 
 
 ## Configuration
 1. **Grant Wireless Debugging:**  
-   - Enable Wireless Debugging from the developer options
+   - [optional] Enable Wireless Debugging from the developer options for app screen mirroring
 
 2. **First Launch:**  
    - Grant notification and clipboard permissions as prompted.
