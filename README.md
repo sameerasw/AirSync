@@ -1,6 +1,8 @@
 
 # AirSync (Android Client)  
 
+## [Discontinued] Moved to [sameerasw/airsync-android](https://github.com/sameerasw/airsync-android)
+
 *Sync Android notifications to macOS and share your clipboard between both devices.*
 
 ---
